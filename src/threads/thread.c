@@ -200,7 +200,7 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
-
+  thread_preempt_if_needed ();
 
   return tid;
 }
@@ -315,6 +315,38 @@ thread_yield (void)
   intr_set_level (old_level);
 }
 
+/* If any ready thread has a higher priority than the running
+   thread, give up the CPU so it can run. */
+void
+thread_preempt_if_needed (void)
+{
+  struct thread *cur = thread_current ();
+  struct list_elem *e;
+  bool should_yield = false;
+  enum intr_level old_level = intr_disable ();
+
+  for (e = list_begin (&ready_list); e != list_end (&ready_list);
+       e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, elem);
+      if (t->priority > cur->priority)
+        {
+          should_yield = true;
+          break;
+        }
+    }
+
+  intr_set_level (old_level);
+
+  if (should_yield)
+    {
+      if (intr_context ())
+        intr_yield_on_return ();
+      else
+        thread_yield ();
+    }
+}
+
 /* Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
 void
@@ -337,6 +369,7 @@ void
 thread_set_priority (int new_priority) 
 {
   thread_current ()->priority = new_priority;
+  thread_preempt_if_needed ();
 }
 
 /* Returns the current thread's priority. */
