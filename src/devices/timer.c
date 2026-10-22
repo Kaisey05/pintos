@@ -201,6 +201,7 @@ timer_interrupt (struct intr_frame *args UNUSED)
     e = list_next(e);
   }
   thread_tick ();
+  thread_preempt_if_needed ();
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
