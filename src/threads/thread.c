@@ -4,6 +4,7 @@
 #include <random.h>
 #include <stdio.h>
 #include <string.h>
+#include "threads/fixed-point.h"
 #include "threads/flags.h"
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
@@ -11,6 +12,7 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "devices/timer.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -58,6 +60,7 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
+static int load_avg;
 
 static void kernel_thread (thread_func *, void *aux);
 
@@ -69,6 +72,9 @@ static bool is_thread (struct thread *) UNUSED;
 static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
+static void update_load_avg (void);
+static void update_recent_cpu (struct thread *t, void *aux);
+static void update_priority (struct thread *t, void *aux);
 static tid_t allocate_tid (void);
 
 /* Initializes the threading system by transforming the code
@@ -87,6 +93,7 @@ static tid_t allocate_tid (void);
 void
 thread_init (void) 
 {
+  load_avg = 0;
   ASSERT (intr_get_level () == INTR_OFF);
 
   lock_init (&tid_lock);
@@ -95,7 +102,7 @@ thread_init (void)
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
-  init_thread (initial_thread, "main", PRI_DEFAULT);
+  init_thread (initial_thread, "main", thread_mlfqs ? PRI_MAX : PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
 }
@@ -123,7 +130,22 @@ void
 thread_tick (void) 
 {
   struct thread *t = thread_current ();
+if (thread_mlfqs)
+    {
+      if (t != idle_thread)
+        t->recent_cpu = ADD (t->recent_cpu, TO_FIXED (1));
 
+      if (timer_ticks () % TIMER_FREQ == 0)
+        {
+          update_load_avg ();
+          thread_foreach (update_recent_cpu, NULL);
+        }
+
+      if (timer_ticks () % 4 == 0)
+        {
+          thread_foreach (update_priority, NULL);
+        }
+    }
   /* Update statistics. */
   if (t == idle_thread)
     idle_ticks++;
@@ -134,10 +156,31 @@ thread_tick (void)
   else
     kernel_ticks++;
 
+if (thread_mlfqs && !list_empty (&ready_list))
+  {
+    struct list_elem *e;
+    struct thread *next;
+
+    for (e = list_begin (&ready_list);
+         e != list_end (&ready_list);
+         e = list_next (e))
+      {
+        next = list_entry (e, struct thread, elem);
+
+        if (next->priority > t->priority)
+          {
+            intr_yield_on_return ();
+            break;
+          }
+      }
+  }
+
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
 }
+
+
 
 /* Prints thread statistics. */
 void
@@ -181,6 +224,13 @@ thread_create (const char *name, int priority,
 
   /* Initialize thread. */
   init_thread (t, name, priority);
+
+  if (thread_mlfqs)
+  {
+    t->nice = thread_current ()->nice;
+    t->recent_cpu = thread_current()->recent_cpu;
+    update_priority(t, NULL);
+  }
   tid = t->tid = allocate_tid ();
 
   /* Stack frame for kernel_thread(). */
@@ -411,33 +461,59 @@ thread_get_priority (void)
 
 /* Sets the current thread's nice value to NICE. */
 void
-thread_set_nice (int nice UNUSED) 
+thread_set_nice (int nice)
 {
-  /* Not yet implemented. */
+  struct thread *t = thread_current ();
+  struct list_elem *e;
+  enum intr_level old_level = intr_disable ();
+
+  t->nice = nice;
+
+  if (thread_mlfqs)
+    {
+      update_priority (t, NULL);
+
+      for (e = list_begin (&ready_list);
+           e != list_end (&ready_list);
+           e = list_next (e))
+        {
+          struct thread *next = list_entry (e, struct thread, elem);
+
+          if (next->priority > t->priority)
+            {
+              intr_set_level (old_level);
+              thread_yield ();
+              return;
+            }
+        }
+    }
+
+  intr_set_level (old_level);
 }
 
 /* Returns the current thread's nice value. */
 int
 thread_get_nice (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return thread_current()->nice;
 }
 
 /* Returns 100 times the system load average. */
 int
 thread_get_load_avg (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return((int64_t) load_avg * 100 + SCALE / 2) / SCALE;
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  int cpu = thread_current()->recent_cpu;
+  if (cpu >= 0)
+  return (cpu * 100 + SCALE / 2) / SCALE;
+  else
+  return (cpu * 100 - SCALE / 2) / SCALE;
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -526,6 +602,8 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->nice = 0;
+  t->recent_cpu = 0;
   t->base_priority = priority;
   t->waiting_lock = NULL;
   list_init (&t->donations);
@@ -660,8 +738,54 @@ allocate_tid (void)
   lock_release (&tid_lock);
 
   return tid;
+
+}
+static void
+update_load_avg (void)
+{
+  int ready = list_size (&ready_list);
+  if(thread_current () != idle_thread)
+  ready++;
+
+  load_avg = MULTI(DIV (TO_FIXED (59), TO_FIXED (60)), load_avg) + MULTI(DIV(TO_FIXED(1), TO_FIXED(60)), TO_FIXED(ready));
+
+            
 }
 
+static void
+update_recent_cpu (struct thread *t, void *aux)
+{
+  /* Idle check */
+  if (t == idle_thread)
+  return;
+int twice = MULTI(TO_FIXED (2), load_avg);
+int ratio = DIV(twice, ADD(twice, TO_FIXED(1)));
+t->recent_cpu = ADD(MULTI(ratio, t->recent_cpu), TO_FIXED(t->nice));
+
+
+            
+}
+
+static void
+update_priority (struct thread *t, void *aux)
+{
+if (t == idle_thread)
+  return;
+int priority = PRI_MAX - ROUND(t->recent_cpu / 4) - (t->nice * 2);
+if (priority > PRI_MAX)
+  priority = PRI_MAX;
+else if (priority < PRI_MIN)
+  priority = PRI_MIN;
+t->priority = priority;
+
+}
+
+
+
+
+
+
+
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
