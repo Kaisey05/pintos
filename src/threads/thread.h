@@ -88,8 +88,7 @@ struct thread
     tid_t tid;                          /* Thread identifier. */
     enum thread_status status;          /* Thread state. */
     char name[16];                      /* Name (for debugging purposes). */
-    uint8_t *stack;                     /* Saved stack pointer. */
-    int priority;                       /* Priority. */
+    uint8_t *stack;                     /* Saved stack pointer. */          
     int nice;                          /* Nice value */
     int recent_cpu;                    /* Recent CPU usage (fixed-point)*/                      
     int priority;                       /* Effective priority (with donations). */
