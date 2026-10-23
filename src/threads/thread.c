@@ -767,23 +767,22 @@ t->recent_cpu = ADD(MULTI(ratio, t->recent_cpu), TO_FIXED(t->nice));
 }
 
 static void
-update_priority (struct thread *t, void *aux)
+update_priority (struct thread *t, void *aux UNUSED)
 {
-if (t == idle_thread)
-  return;
-int priority = PRI_MAX - ROUND(t->recent_cpu / 4) - (t->nice * 2);
-if (priority > PRI_MAX)
-  priority = PRI_MAX;
-else if (priority < PRI_MIN)
-  priority = PRI_MIN;
-t->priority = priority;
+  int priority;
 
+  if (t == idle_thread)
+    return;
+
+  /* Truncate recent_cpu / 4, as the spec requires. */
+  priority = PRI_MAX - TO_INT (t->recent_cpu / 4) - (t->nice * 2);
+
+  if (priority > PRI_MAX)
+    priority = PRI_MAX;
+  else if (priority < PRI_MIN)
+    priority = PRI_MIN;
+  t->priority = priority;
 }
-
-
-
-
-
 
 
 /* Offset of `stack' member within `struct thread'.
