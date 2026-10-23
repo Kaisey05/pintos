@@ -347,6 +347,25 @@ thread_preempt_if_needed (void)
     }
 }
 
+/* Recalculates T's priority as the higher of its base priority
+   and the highest priority donated to it.  Interrupts must be
+   off. */
+void
+thread_refresh_priority (struct thread *t)
+{
+  struct list_elem *e;
+
+  t->priority = t->base_priority;
+
+  for (e = list_begin (&t->donations); e != list_end (&t->donations);
+       e = list_next (e))
+    {
+      struct thread *donor = list_entry (e, struct thread, donation_elem);
+      if (donor->priority > t->priority)
+        t->priority = donor->priority;
+    }
+}
+
 /* Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
 void
@@ -364,11 +383,22 @@ thread_foreach (thread_action_func *func, void *aux)
     }
 }
 
-/* Sets the current thread's priority to NEW_PRIORITY. */
+/* Sets the current thread's base priority to NEW_PRIORITY.
+   Donated priority still applies until it is released. */
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
+  struct thread *cur = thread_current ();
+  enum intr_level old_level;
+
+  if (thread_mlfqs)
+    return;
+
+  old_level = intr_disable ();
+  cur->base_priority = new_priority;
+  thread_refresh_priority (cur);
+  intr_set_level (old_level);
+
   thread_preempt_if_needed ();
 }
 
@@ -409,7 +439,7 @@ thread_get_recent_cpu (void)
   /* Not yet implemented. */
   return 0;
 }
-
+
 /* Idle thread.  Executes when no other thread is ready to run.
 
    The idle thread is initially put on the ready list by
@@ -458,7 +488,7 @@ kernel_thread (thread_func *function, void *aux)
   function (aux);       /* Execute the thread function. */
   thread_exit ();       /* If function() returns, kill the thread. */
 }
-
+
 /* Returns the running thread. */
 struct thread *
 running_thread (void) 
@@ -496,6 +526,9 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->base_priority = priority;
+  t->waiting_lock = NULL;
+  list_init (&t->donations);
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
@@ -628,7 +661,7 @@ allocate_tid (void)
 
   return tid;
 }
-
+
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
