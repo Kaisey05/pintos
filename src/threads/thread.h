@@ -5,6 +5,8 @@
 #include <list.h>
 #include <stdint.h>
 
+struct lock;   /* Defined in synch.h; we only need a pointer to it here. */
+
 /* States in a thread's life cycle. */
 enum thread_status
   {
@@ -90,6 +92,11 @@ struct thread
     int priority;                       /* Priority. */
     int nice;                          /* Nice value */
     int recent_cpu;                    /* Recent CPU usage (fixed-point)*/                      
+    int priority;                       /* Effective priority (with donations). */
+    int base_priority;                  /* Priority before donations. */
+    struct lock *waiting_lock;          /* Lock this thread is waiting for. */
+    struct list donations;              /* Threads donating priority to us. */
+    struct list_elem donation_elem;     /* Element in another thread's donations. */
     int64_t wakeup_tick;               /* Stores timer tick */
     struct list_elem sleep_elem;
     struct list_elem allelem;           /* List element for all threads list. */
@@ -130,6 +137,7 @@ const char *thread_name (void);
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);
 void thread_preempt_if_needed (void);
+void thread_refresh_priority (struct thread *t);
 
 /* Performs some operation on thread t, given auxiliary data AUX. */
 typedef void thread_action_func (struct thread *t, void *aux);
